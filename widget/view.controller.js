@@ -8,9 +8,9 @@
       .module('cybersponse')
       .controller('fortiAIConfiguration300Ctrl', fortiAIConfiguration300Ctrl);
   
-    fortiAIConfiguration300Ctrl.$inject = ['$scope', '$rootScope', 'fortiAiConfigService', 'toaster', 'WizardHandler', '$window', '_', 'currentPermissionsService', 'connectorService', 'CommonUtils', '$controller', 'widgetBasePath', 'fileService'];
+    fortiAIConfiguration300Ctrl.$inject = ['$scope', '$rootScope', 'fortiAiConfigService', 'toaster', 'WizardHandler', '$window', '_', 'currentPermissionsService', 'connectorService', 'CommonUtils', '$controller', 'widgetBasePath', 'fileService', '$q'];
   
-    function fortiAIConfiguration300Ctrl($scope, $rootScope, fortiAiConfigService, toaster, WizardHandler, $window, _, currentPermissionsService, connectorService, CommonUtils, $controller, widgetBasePath, fileService) {
+    function fortiAIConfiguration300Ctrl($scope, $rootScope, fortiAiConfigService, toaster, WizardHandler, $window, _, currentPermissionsService, connectorService, CommonUtils, $controller, widgetBasePath, fileService, $q) {
       $controller('BaseConnectorCtrl', {
         $scope: $scope
       });
@@ -32,7 +32,7 @@
       $scope.createAssistantGraphics = $scope.isLightTheme ? + widgetBasePath + 'images/fortiai-create-assistant-light.png' : widgetBasePath + 'images/fortiai-create-assistant-dark.png';
       $scope.widgetCSS = widgetBasePath + 'assets/fortiAiConfig.css';
       $scope.assistantStatus = 'Create'; 
-      var attachmentData = '',soc_json_data = '', pb_instruction = '';
+      var attachmentData = '',soc_function_data = '', pb_instruction = '';
       var soc_assistant_id = '' , playbook_assistant_id = '';
       $scope.createUpdateActionClicked = false;
       $scope.openAIAssitant = {};
@@ -192,14 +192,21 @@
   
       //load step4 - create assistant page
       function loadAssistantPage() {
-        $scope.projectId = "proj_4chZohs0W0VUeubUcZk5vIsD"; //default project id given
-        $scope.openAIAssitant['playbookAssistantName'] = "";
-        $scope.openAIAssitant['socAssistantName'] = "";
+        $scope.openAIAssitant['playbookAssistantName'] = "fsr-ai-playbook-assistant";
+        $scope.openAIAssitant['socAssistantName'] = "fsr-ai-soc-assistant";
         $scope.assistantCreated = false;
         $scope.config_name = $scope.input.selectedConfiguration.config_id;
-        loadAttachmentData();
-        getAssistantIds();
-        WizardHandler.wizard('fortiAIConfiguration').next();
+        $q.all([loadAttachmentData(), getAssistantIds()]).then((response) => {
+          let assistentPromise = playbook_assistant_id && soc_assistant_id ? updateAssistant() : createAssistant();
+          assistentPromise.then(function(response) {
+            saveAssistants(response).then(function() {
+              WizardHandler.wizard('fortiAIConfiguration').next();
+            });
+          });
+        });
+        // loadAttachmentData();
+        // getAssistantIds();
+        
       }
   
       //to enable/disable button when change in text
@@ -209,39 +216,49 @@
   
       //load file instruction for soc assistant from attachment module
       function loadAttachmentData(){
-        fortiAiConfigService.getAttachmentRecord($scope.llmIntegrationData.queryForAttachment,'attachments').then(function (response) {
+        var defer = $q.defer();
+        const soc_instruction = fortiAiConfigService.getAttachmentRecord($scope.llmIntegrationData.queryForAttachment,'attachments').then(function (response) {
           if (response['hydra:member'] && (response['hydra:member'][0])) {
             var fileId = response['hydra:member'][0]['file']['id'];
             fileService.getFile(fileId).then(function(response){
               attachmentData = response.data;
-              console.log(attachmentData);
+              //console.log(attachmentData);
             })
           }
           else {
-            toaster.error({ body: "Attachment record not found." });
+            toaster.error({ body: 'SOC Instruction attachment record not found.' });
           }
         });
-        fortiAiConfigService.executeAction('aiassistant-utils', 'get_assistants_data', $scope.config_name).then(function (assistantData) {
+        const soc_pb_instruction = fortiAiConfigService.executeAction('aiassistant-utils', 'get_assistants_data', $scope.config_name).then(function (assistantData) {
           if(assistantData && assistantData.data){
-            soc_json_data = assistantData.data.soc_assistant_json;
+            soc_function_data = assistantData.data.soc_assistant_json;
             pb_instruction = assistantData.data.playbook_assistant_instruction;
           }
         }, function (error) {
-          console.log(error)
+          toaster.error({ body: 'Assistant data not found' });
         });
+        $q.all([soc_instruction, soc_pb_instruction]).then((response) => {
+          // if (response) {
+            //getAssistantIds();
+            defer.resolve();
+          // }
+        }).catch((error) => {
+          toaster.error({ body: 'Assistant ids not found' });
+        })
+        return defer.promise;
       }
   
    
       // check if assistant ids are already present
       function getAssistantIds(){
+        var defer = $q.defer();
         var config_name = $scope.input.selectedConfiguration.config_id;
         var payload = { genai_type: 'OpenAI' };
         fortiAiConfigService.executeAction('aiassistant-utils', 'get_assistant_ids',null, payload)
         .then(function (response) {
           if (response) {
-            if(response.data !== null && (response.data.soc_assistant_id !== '' || response.data.playbook_assistant_id !== '')){
+            if(response.data !== null && (response.data.soc_assistant_id !== '' && response.data.playbook_assistant_id !== '')){
               $scope.assistantStatus = 'Update';
-  
               var socId_payload = { assistant_id: response.data.soc_assistant_id}; 
               soc_assistant_id = response.data.soc_assistant_id;
               const soc_name_promise = fortiAiConfigService.executeAction('openai', 'get_assistant', config_name, socId_payload).then(function (soc_response) {
@@ -252,39 +269,44 @@
               const pb_name_promise = fortiAiConfigService.executeAction('openai', 'get_assistant', config_name, pbId_payload).then(function (pb_response) {
                 return pb_response;
               });
-              Promise.all([soc_name_promise, pb_name_promise]).then((responses) => {
+              $q.all([soc_name_promise, pb_name_promise]).then((responses) => {
                 if (responses) {
                   $scope.openAIAssitant.socAssistantName = responses[0].data.name;
                   $scope.openAIAssitant.playbookAssistantName = responses[1].data.name;
-  
                   //updateAssistant();
                 }
+                defer.resolve();
               }).catch((error) => {
                 console.log(error);
+                defer.reject();
               })
             }
             else{
               $scope.assistantStatus = 'Create';
               //createAssistant();
+              defer.resolve();
             }
           }
         }, function (error) {
-          console.log(error)
+          toaster.error({ body: 'Assistant id not found' });
+          defer.reject();
         });
+        return defer.promise;
       }
   
       function createUpdateAssistant(){
-        $scope.createUpdateActionClicked = true;
-        if($scope.assistantStatus === 'Create'){
-          createAssistant();
-        }
-        else{
-          updateAssistant();
-        }
+        // $scope.createUpdateActionClicked = true;
+        // if($scope.assistantStatus === 'Create'){
+        //   createAssistant();
+        // }
+        // else{
+        //   updateAssistant();
+        // }
       }
   
       //call create_assistant from openaicand then save the assistant ids in assistant utils 
       function createAssistant() {
+        var defer = $q.defer();
         var pb_payload = {
           model: $scope.defaultLLMIntegration.pBGenerationModel,
           description: 'playbook',
@@ -301,7 +323,7 @@
           model: $scope.defaultLLMIntegration.pBGenerationModel,
           description: 'soc',
           instructions: JSON.stringify(attachmentData), //txt file content
-          tools: soc_json_data, //josn
+          tools: soc_function_data, //josn
           name: $scope.openAIAssitant.socAssistantName, //ui-soc-assistant,
         }
         const soc_promise = fortiAiConfigService.executeAction('openai', 'create_assistant', config_name, soc_payload).then(function (soc_response) {
@@ -309,16 +331,21 @@
           return soc_response;
         });
   
-        Promise.all([pb_promise, soc_promise]).then((responses) => {
-          if (responses) {
-            saveAssistants(responses);
-          }
+        $q.all([pb_promise, soc_promise]).then((responses) => {
+          // if (responses) {
+          //   saveAssistants(responses);
+          // }
+          defer.resolve(responses);
         }).catch((error) => {
           console.log(error);
+          toaster.error({ body: 'Unable to create assistant' });
+          defer.reject();
         })
+        return defer.promise;
       }
   
       function updateAssistant(){
+        var defer = $q.defer();
         var pb_payload = {
           assistant_id: playbook_assistant_id,
           model: $scope.defaultLLMIntegration.pBGenerationModel,
@@ -337,7 +364,7 @@
           model: $scope.defaultLLMIntegration.pBGenerationModel,
           description: 'soc',
           instructions: JSON.stringify(attachmentData), //txt file content
-          tools: soc_json_data, //josn
+          tools: soc_function_data, //josn
           name: $scope.openAIAssitant.socAssistantName, //ui-soc-assistant,
         }
         const soc_promise = fortiAiConfigService.executeAction('openai', 'update_assistant', config_name, soc_payload).then(function (soc_response) {
@@ -345,16 +372,20 @@
           return soc_response;
         });
   
-        Promise.all([pb_promise, soc_promise]).then((responses) => {
-          if (responses) {
-            saveAssistants(responses);
-          }
+        $q.all([pb_promise, soc_promise]).then((responses) => {
+          // if (responses) {
+          //   saveAssistants(responses);
+          // }
+          defer.resolve(responses);
         }).catch((error) => {
-          console.log(error);
+          toaster.error({ body: 'Unable to update assistant.' });
+          defer.reject(error);
         })
+        return defer.promise;
       }
        
       function saveAssistants(responses) {
+        var defer = $q.defer();
         var playbook_id = '', soc_id = '';
         responses.forEach(element => {
           if (element['data']['description'] === 'playbook') {
@@ -373,10 +404,15 @@
           if (data && data.status === 'Success') {
             $scope.createUpdateActionClicked = false;
             $scope.assistantCreated = true;
+            defer.resolve();
+          } else {
+            defer.reject();
           }
         }, function (error) {
-          console.log(error)
+          toaster.error({ body: 'Assistant not created' });
+          defer.reject();
         })
+        return defer.promise;
       }
   
       function moveBack() {
@@ -384,3 +420,4 @@
       }
     }
   })();
+  
